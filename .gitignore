@@ -8,6 +8,7 @@ data/
 *.zip
 *.pt
 
-
+vis_frame_*.jpg
+test_detection_output*.jpg
 # OS files
 .DS_Store
