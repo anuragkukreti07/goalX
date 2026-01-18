@@ -1,5 +1,13 @@
+# Python environment
 venv/
 __pycache__/
 *.pyc
-data/raw_videos/*
-data/frames/*
+
+# Data (Crucial: do not upload 8GB of SoccerNet!)
+data/
+*.zip
+*.pt
+
+
+# OS files
+.DS_Store
