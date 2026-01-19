@@ -12,3 +12,12 @@ vis_frame_*.jpg
 test_detection_output*.jpg
 # OS files
 .DS_Store
+
+# ... existing lines ...
+*.mp4
+*.avi
+*.mov
+*.csv
+__pycache__/
+src/goalx/ps1_cv/bytetrack/__pycache__/
+*.egg-info/
