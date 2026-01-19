@@ -18,6 +18,7 @@ test_detection_output*.jpg
 *.avi
 *.mov
 *.csv
+*.png
 __pycache__/
 src/goalx/ps1_cv/bytetrack/__pycache__/
 *.egg-info/
