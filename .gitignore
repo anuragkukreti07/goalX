@@ -1,24 +1,67 @@
-# Python environment
-venv/
+# ==============================
+# Python
+# ==============================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
 
-# Data (Crucial: do not upload 8GB of SoccerNet!)
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# ==============================
+# Data (VERY IMPORTANT)
+# ==============================
 data/
+datasets/
 *.zip
-*.pt
+*.tar
+*.tar.gz
+*.csv
 
+# ==============================
+# Model Weights
+# ==============================
+*.pt
+*.pth
+*.onnx
+
+# ==============================
+# Generated Images / Visualizations
+# ==============================
 vis_frame_*.jpg
 test_detection_output*.jpg
-# OS files
-.DS_Store
+*.png
 
-# ... existing lines ...
+# ==============================
+# Videos
+# ==============================
 *.mp4
 *.avi
 *.mov
-*.csv
-*.png
-__pycache__/
+*.mkv
+
+# ==============================
+# Logs & Outputs
+# ==============================
+runs/
+outputs/
+logs/
+models/
+
+
+# ==============================
+# OS Files
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# ByteTrack cache
+# ==============================
 src/goalx/ps1_cv/bytetrack/__pycache__/
-*.egg-info/
