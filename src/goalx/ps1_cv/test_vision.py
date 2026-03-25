@@ -1,78 +1,115 @@
-'''import cv2
-from ultralytics import YOLO
+"""
+test_vision.py — Quick sanity-check for player/ball detection using SAHI slicing.
+
+Two modes (set MODE below):
+  "sahi"   – Sliced Adaptive Histogram Inference (catches small/distant players)
+  "vanilla"– Plain YOLOv8 inference (faster, useful baseline comparison)
+"""
+
 import os
+from pathlib import Path
 
-# Updated path to match the extracted SoccerNet images
-IMG_PATH = "data/raw_videos/tracking/test/SNMOT-116/img1/000535.jpg"
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+IMG_PATH   = "data/raw_videos/tracking/test/SNMOT-116/img1/000535.jpg"
+MODEL_PATH = "yolov8s.pt"
+DEVICE     = "cpu"          # "cuda:0" if you have a GPU
+CONF       = 0.15           # Low threshold to catch the ball
+MODE       = "vanilla"         # "sahi" | "vanilla"
 
-def run_test():
-    if not os.path.exists(IMG_PATH):
-        print(f"Error: Could not find image at {IMG_PATH}")
-        return
+# SAHI slice settings — 400 px tiles with 20 % overlap works well for 1080p broadcasts
+SLICE_H     = 400
+SLICE_W     = 400
+OVERLAP     = 0.2
 
-    # Load the Nano model (fastest for your Inspiron)
-    # It will download automatically
-    model = YOLO("yolov8n.pt")
-
-    # Run detection
-    # imgsz=1280 is required for small player detection in tactical views
-    results = model(IMG_PATH, imgsz=1280, conf=0.3)
-
-    # Plot results on the image and save it
-    res_plotted = results[0].plot()
-    cv2.imwrite("test_detection_output.jpg", res_plotted)
-    print("Success! Open 'test_detection_output.jpg' to see the AI in action.")
-
-if __name__ == "__main__":
-    run_test()'''
+# Classes to keep: 0 = person, 32 = sports ball
+KEEP_CLASSES = {0, 32}
+# ──────────────────────────────────────────────────────────────────────────────
 
 
-#Using sahi slicing
+def run_sahi_test(img_path: str, model_path: str) -> None:
+    from sahi import AutoDetectionModel
+    from sahi.predict import get_sliced_prediction
 
-
-import cv2
-import os
-from sahi import AutoDetectionModel
-from sahi.predict import get_sliced_prediction
-
-# Paths
-IMG_PATH = "data/raw_videos/tracking/test/SNMOT-116/img1/000535.jpg"
-MODEL_PATH = "yolov8s.pt" # S-model is better than N
-
-def run_sahi_test():
-    # 1. Load the model via SAHI wrapper
     detection_model = AutoDetectionModel.from_pretrained(
-        model_type='ultralytics',
-        model_path=MODEL_PATH,
-        confidence_threshold=0.15, # Keep it low to catch the ball
-        device="cpu" # Use "cuda:0" if you have a GPU
+        model_type="ultralytics",
+        model_path=model_path,
+        confidence_threshold=CONF,
+        device=DEVICE,
     )
 
-    # 2. Run SLICED prediction
-    # slice_height/width: size of each tile
-    # overlap_ratio: ensures objects on the "cut line" aren't missed
     result = get_sliced_prediction(
-        IMG_PATH,
+        img_path,
         detection_model,
-        slice_height=400,
-        slice_width=400,
-        overlap_height_ratio=0.2,
-        overlap_width_ratio=0.2
+        slice_height=SLICE_H,
+        slice_width=SLICE_W,
+        overlap_height_ratio=OVERLAP,
+        overlap_width_ratio=OVERLAP,
     )
 
-    # 3. Filter and Visualize
-    # result.object_prediction_list contains all boxes
-    # We only want classes 0 (person) and 32 (ball)
-    result.export_visuals(export_dir=".", file_name="test_detection_sahi")
-    
-    # Check for ball in predictions
-    ball_detected = any(pred.category.id == 32 for pred in result.object_prediction_list)
-    
-    print("-" * 30)
-    if ball_detected:
-        print("⚽ SUCCESS: Ball detected using SAHI slicing!")
+    # Filter to only our target classes before exporting
+    filtered = [
+        p for p in result.object_prediction_list
+        if p.category.id in KEEP_CLASSES
+    ]
+    # Mutate list in-place so export_visuals draws only filtered boxes
+    result.object_prediction_list = filtered
+
+    out_dir = Path(".")
+    result.export_visuals(export_dir=str(out_dir), file_name="test_detection_sahi")
+
+    n_players = sum(1 for p in filtered if p.category.id == 0)
+    n_balls   = sum(1 for p in filtered if p.category.id == 32)
+
+    print("-" * 40)
+    print(f"👥  Players detected : {n_players}")
+    if n_balls:
+        print(f"⚽  Ball detected    : {n_balls}")
     else:
-        print("⚠️ Ball still missing. This is a great research point for your thesis.")
+        print("⚠️  Ball not found — consider lowering CONF or using a finetuned model.")
+    print(f"🖼️  Output saved     : test_detection_sahi.png")
+
+
+def run_vanilla_test(img_path: str, model_path: str) -> None:
+    import cv2
+    from ultralytics import YOLO
+
+    model = YOLO(model_path)
+    results = model.predict(
+        img_path,
+        imgsz=1280,
+        conf=CONF,
+        classes=list(KEEP_CLASSES),
+        verbose=False,
+    )
+
+    out_img = results[0].plot()
+    out_path = "test_detection_vanilla.jpg"
+    cv2.imwrite(out_path, out_img)
+
+    boxes = results[0].boxes
+    n_players = int((boxes.cls == 0).sum())
+    n_balls   = int((boxes.cls == 32).sum())
+
+    print("-" * 40)
+    print(f"👥  Players detected : {n_players}")
+    print(f"⚽  Ball detected    : {n_balls}")
+    print(f"🖼️  Output saved     : {out_path}")
+
+
+def main() -> None:
+    img_path = Path(IMG_PATH)
+    if not img_path.exists():
+        raise FileNotFoundError(f"Image not found: {img_path}")
+
+    print(f"🔎  Mode: {MODE.upper()}  |  Model: {MODEL_PATH}  |  Image: {img_path.name}\n")
+
+    if MODE == "sahi":
+        run_sahi_test(str(img_path), MODEL_PATH)
+    elif MODE == "vanilla":
+        run_vanilla_test(str(img_path), MODEL_PATH)
+    else:
+        raise ValueError(f"Unknown MODE '{MODE}'. Use 'sahi' or 'vanilla'.")
+
 
 if __name__ == "__main__":
-    run_sahi_test()
+    main()

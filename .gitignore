@@ -37,7 +37,7 @@ datasets/
 vis_frame_*.jpg
 test_detection_output*.jpg
 *.png
-
+*.jpg
 # ==============================
 # Videos
 # ==============================
