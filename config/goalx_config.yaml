@@ -1,0 +1,39 @@
+# goalx_config.yaml — edit paths before running
+
+data:
+  frames_dir:       data/raw_videos/tracking/test/SNMOT-116/img1
+  sample_frame:     data/raw_videos/tracking/test/SNMOT-116/img1/000001.jpg
+  pitch_map:        data/pitch_map.png
+  homography_npz:   data/homography_data.npz
+  ground_truth_dir: data/ground_truth     # optional, for evaluation
+
+model:
+  yolo_weights: yolov8s.pt
+  imgsz:        1280
+  conf:         0.25
+  batch_size:   8
+  track_thresh: 0.20
+  match_thresh: 0.90
+  track_buffer: 90
+
+smoothing:
+  window:            7
+  teleport_clamp_px: 50
+
+outputs:
+  detections_csv:     data/detections_raw.csv
+  tracking_csv:       data/tracking.csv
+  projected_dir:      outputs/projected
+  smoothed_csv:       outputs/smoothed_tracks.csv
+  events_csv:         outputs/events.csv
+  radar_mp4:          outputs/tactical_radar.mp4
+  team_csv:           outputs/team_labels.csv
+  formation_csv:      outputs/formations.csv
+  pitch_control_dir:  outputs/pitch_control
+  clutch_csv:         outputs/clutch_scores.csv
+  radar_charts_dir:   outputs/radar_charts
+  overlay_mp4:        outputs/broadcast_overlay.mp4
+  heatmaps_dir:       outputs/heatmaps
+  eval_dir:           outputs/evaluation
+  thesis_report_html: outputs/thesis_report.html
+  run_log:            outputs/run_log.json

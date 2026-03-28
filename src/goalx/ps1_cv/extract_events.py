@@ -306,8 +306,8 @@ def extract_pressure(
 
 def run(
     tracks_csv:  str,
-    ball_csv:    Optional[str],
-    out_dir:     str,
+    out_dir:     str,  # Keep the name 'out_dir' to avoid the TypeError
+    ball_csv:    Optional[str] = None,
     pitch_w:     int = PITCH_W,
     pitch_h:     int = PITCH_H,
 ) -> pd.DataFrame:
@@ -316,8 +316,12 @@ def run(
     PITCH_W = pitch_w
     PITCH_H = pitch_h
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # ── PATH FIX ──────────────────────────────────────────────────
+    # The orchestrator sends 'outputs/events.csv'
+    out_path = Path(out_dir)
+    
+    # This creates the 'outputs/' folder, NOT a folder named 'events.csv'
+    out_path.parent.mkdir(parents=True, exist_ok=True) 
 
     print(f"\n  goalX — Advanced Event Extractor")
     print(f"  {'─' * 40}")
@@ -334,6 +338,7 @@ def run(
 
     if ball_df.empty:
         print("  ⚠  No projected ball found (track_id = -1). Skipping events.")
+        pd.DataFrame(columns=["frame_id", "event_type"]).to_csv(out_path, index=False)
         return pd.DataFrame()
 
     # Calculate Ball Kinematics
@@ -363,13 +368,14 @@ def run(
 
     if all_events.empty:
         print("\n  ⚠  No events detected. Check thresholds.")
+        pd.DataFrame(columns=["frame_id", "event_type"]).to_csv(out_path, index=False)
         return all_events
 
     all_events.sort_values("frame_id", inplace=True, ignore_index=True)
 
     # ── Save ──────────────────────────────────────────────────────
-    out_csv = out_dir / "events.csv"
-    all_events.to_csv(out_csv, index=False)
+    # We save directly to out_path, which is 'outputs/events.csv'
+    all_events.to_csv(out_path, index=False)
 
     # ── Summary ───────────────────────────────────────────────────
     summary = all_events.groupby("event_type").size().to_dict()
@@ -377,39 +383,27 @@ def run(
     for etype, count in sorted(summary.items()):
         print(f"     {etype:<12} : {count}")
 
-    print(f"\n  💾 Saved → {out_csv}")
+    print(f"\n  💾 Saved → {out_path}")
     print(f"\n  ✅  Event extraction complete.\n")
 
     return all_events
 
 
 # ─────────────────────────────────────────────────────────────────
-#  CLI
+#  CLI Aligned with run_goalx.py
 # ─────────────────────────────────────────────────────────────────
 
-def _parse_args():
-    p = argparse.ArgumentParser(
-        description="Extract football events from smoothed player + ball tracks."
-    )
-    p.add_argument("--tracks",   required=True,
-                   help="smoothed_tracks.csv from smooth_tracks.py")
-    p.add_argument("--ball",     default="none",
-                   help="(Deprecated) Ball is now extracted natively from --tracks")
-    p.add_argument("--out-dir",  default="outputs/events",
-                   help="Output directory  (default: outputs/events)")
-    p.add_argument("--pitch-w",  type=int, default=PITCH_W,
-                   help=f"Pitch canvas width in px  (default: {PITCH_W})")
-    p.add_argument("--pitch-h",  type=int, default=PITCH_H,
-                   help=f"Pitch canvas height in px  (default: {PITCH_H})")
-    return p.parse_args()
-
-
 if __name__ == "__main__":
-    args = _parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tracks", required=True)
+    parser.add_argument("--out",    required=True)
+    parser.add_argument("--ball",   required=False)
+    
+    args = parser.parse_args()
+    
+    # We pass args.out to the out_dir parameter
     run(
         tracks_csv = args.tracks,
-        ball_csv   = args.ball,
-        out_dir    = args.out_dir,
-        pitch_w    = args.pitch_w,
-        pitch_h    = args.pitch_h,
+        out_dir    = args.out,
+        ball_csv   = args.ball
     )
