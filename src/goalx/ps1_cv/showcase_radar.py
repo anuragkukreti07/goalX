@@ -1,84 +1,224 @@
+"""
+showcase_radar.py
+─────────────────
+Renders a top-down tactical radar video from smoothed player + ball tracks,
+annotated with detected events.
+
+Improvements over v1
+────────────────────
+  • Team-coloured dots (reads team_assignments.csv if available)
+  • Ball drawn at correct smoothed position
+  • Event flash: circles pulse on the pitch at shot / pressure locations
+  • Player trails (last TRAIL_FRAMES positions)
+  • Correct frame_id column (was reading wrong column name before)
+  • Event HUD always rendered even without team assignments
+"""
+
+import argparse
+from collections import defaultdict, deque
+from pathlib import Path
+
 import cv2
-import pandas as pd
 import numpy as np
-import os
+import pandas as pd
 from tqdm import tqdm
 
-def run_showcase():
-    # --- CONFIG ---
-    TRACKS_CSV = "outputs/smoothed/smoothed_tracks.csv"
-    EVENTS_CSV = "outputs/events/events.csv"
-    PITCH_IMG  = "data/pitch_map.png"
-    OUT_VID    = "outputs/ps1_tactical_radar.mp4"
+# ─────────────────────────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────────────────────────
 
-    print("\n  goalX — Phase 1 Tactical Radar Showcase")
-    print("  " + "─" * 40)
+FPS         = 25
+TRAIL_LEN   = 15      # frames of position history to show per player
 
-    # 1. Load Data
-    if not os.path.exists(TRACKS_CSV) or not os.path.exists(PITCH_IMG):
-        raise FileNotFoundError("Missing smoothed tracks or pitch map.")
+# BGR colours
+TEAM_COLORS = {
+    "home":    (230,  60,  60),   # red-ish
+    "away":    (60,  200,  60),   # green
+    "other":   (200, 200,  60),   # yellow (refs)
+    "unknown": (180, 180, 180),   # grey fallback
+}
+BALL_COLOR     = (0, 220, 255)    # orange
+EVENT_COLORS   = {
+    "shot":      (0,   80, 255),
+    "possession":(255, 180,   0),
+    "pressure":  (180,   0, 255),
+}
+EVENT_FLASH_FRAMES = 20   # how many frames an event marker stays visible
 
-    tracks = pd.read_csv(TRACKS_CSV)
-    events = pd.read_csv(EVENTS_CSV) if os.path.exists(EVENTS_CSV) else pd.DataFrame()
-    pitch_base = cv2.imread(PITCH_IMG)
-    h, w, _ = pitch_base.shape
 
-    out = cv2.VideoWriter(OUT_VID, cv2.VideoWriter_fourcc(*'mp4v'), 25, (w, h))
-    frames = sorted(tracks["frame_id"].unique())
+def _get_team_color(tid: int, team_map: dict) -> tuple:
+    team = team_map.get(int(tid), "unknown")
+    return TEAM_COLORS.get(team, TEAM_COLORS["unknown"])
 
-    for fid in tqdm(frames, desc="Rendering Radar Video"):
-        img = pitch_base.copy()
+
+def run_showcase(
+    tracks_csv: str,
+    events_csv: str,
+    pitch_img:  str,
+    out_vid:    str,
+    teams_csv:  str = None,
+    fps:        int = FPS,
+) -> None:
+
+    tracks_csv = Path(tracks_csv)
+    events_csv = Path(events_csv)
+    pitch_img  = Path(pitch_img)
+    out_vid    = Path(out_vid)
+    teams_csv  = Path(teams_csv) if teams_csv else None
+
+    print(f"\n  goalX — Tactical Radar Showcase")
+    print(f"  {'─' * 40}")
+
+    # ── Load ──────────────────────────────────────────────────────
+    if not tracks_csv.exists():
+        raise FileNotFoundError(f"smoothed_tracks.csv not found: {tracks_csv}")
+    if not pitch_img.exists():
+        raise FileNotFoundError(f"Pitch map not found: {pitch_img}  — run draw_pitch.py first")
+
+    tracks     = pd.read_csv(tracks_csv)
+    pitch_base = cv2.imread(str(pitch_img))
+    h, w       = pitch_base.shape[:2]
+
+    events = pd.DataFrame()
+    if events_csv.exists():
+        events = pd.read_csv(events_csv)
+        print(f"  ✔  Events: {len(events)} rows")
+
+    # Team colour map
+    team_map: dict[int, str] = {}
+    if teams_csv and teams_csv.exists():
+        teams_df = pd.read_csv(teams_csv)
+        team_map = dict(zip(teams_df["track_id"].astype(int),
+                            teams_df["team"].astype(str)))
+        print(f"  ✔  Team assignments loaded for {len(team_map)} tracks")
+    else:
+        print(f"  ⚠️  No team_assignments.csv — all players shown in grey")
+
+    # Pre-build event flash lookup:  frame → list of (x, y, event_type)
+    flash_lookup: dict[int, list] = defaultdict(list)
+    if not events.empty:
+        for _, ev in events.iterrows():
+            fid = int(ev["frame_id"])
+            
+            # --- FIX: Handle NaN coordinates gracefully ---
+            ex_raw = ev.get("x", 0)
+            ey_raw = ev.get("y", 0)
+            
+            if pd.isna(ex_raw) or pd.isna(ey_raw):
+                continue # Skip drawing a flash if there are no physical coordinates
+                
+            ex = float(ex_raw)
+            ey = float(ey_raw)
+            et = str(ev.get("event_type", "shot"))
+            
+            # Register the event for the next EVENT_FLASH_FRAMES frames
+            for offset in range(EVENT_FLASH_FRAMES):
+                flash_lookup[fid + offset].append((int(ex), int(ey), et))
+
+    # ── Video writer ──────────────────────────────────────────────
+    out_vid.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(out_vid), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+    )
+
+    frames     = sorted(tracks["frame_id"].unique())
+    trail_hist: dict[int, deque] = defaultdict(lambda: deque(maxlen=TRAIL_LEN))
+
+    print(f"  Rendering {len(frames)} frames …")
+    for fid in tqdm(frames, desc="Rendering Radar", unit="frame"):
+        img          = pitch_base.copy()
         frame_tracks = tracks[tracks["frame_id"] == fid]
 
-        # 2. Draw Players and Ball
+        # ── 1. Draw player trails ──────────────────────────────────
         for _, row in frame_tracks.iterrows():
             tid = int(row["track_id"])
-            
-            # Skip rows where smoothing left NaNs (gaps in tracking)
-            if pd.isna(row["smooth_x"]) or pd.isna(row["smooth_y"]):
+            if pd.isna(row.get("smooth_x")) or pd.isna(row.get("smooth_y")):
                 continue
+            px = int(np.clip(row["smooth_x"], 0, w - 1))
+            py = int(np.clip(row["smooth_y"], 0, h - 1))
 
-            px, py = int(row["smooth_x"]), int(row["smooth_y"])
+            trail_hist[tid].append((px, py))
+            if tid != -1:
+                color = _get_team_color(tid, team_map)
+                pts   = list(trail_hist[tid])
+                for k in range(1, len(pts)):
+                    alpha     = k / len(pts)
+                    tc        = tuple(int(c * alpha * 0.7) for c in color)
+                    cv2.line(img, pts[k - 1], pts[k], tc, 1, cv2.LINE_AA)
 
-            # Defensive clamp to keep dots on the canvas
-            px = max(0, min(px, w - 1))
-            py = max(0, min(py, h - 1))
+        # ── 2. Draw players and ball ───────────────────────────────
+        for _, row in frame_tracks.iterrows():
+            tid = int(row["track_id"])
+            if pd.isna(row.get("smooth_x")) or pd.isna(row.get("smooth_y")):
+                continue
+            px = int(np.clip(row["smooth_x"], 0, w - 1))
+            py = int(np.clip(row["smooth_y"], 0, h - 1))
 
             if tid == -1:
-                # Draw Ball (Yellow with black border)
-                cv2.circle(img, (px, py), 6, (0, 0, 0), -1)
-                cv2.circle(img, (px, py), 4, (0, 255, 255), -1)
+                # Ball
+                cv2.circle(img, (px, py), 7, (0, 0, 0), -1)
+                cv2.circle(img, (px, py), 5, BALL_COLOR, -1)
             else:
-                # Draw Player (Red)
-                cv2.circle(img, (px, py), 8, (0, 0, 255), -1)
+                color = _get_team_color(tid, team_map)
+                cv2.circle(img, (px, py), 9, (0, 0, 0), -1)   # shadow
+                cv2.circle(img, (px, py), 8, color, -1)
                 cv2.putText(img, str(tid), (px - 8, py - 12),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                            (255, 255, 255), 1, cv2.LINE_AA)
 
-        # 3. Draw Events HUD
-        if not events.empty:
-            frame_events = events[events["frame_id"] == fid]
-            y_offset = 30
-            
-            # Add Frame Counter
-            cv2.putText(img, f"Frame: {fid}", (20, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            y_offset += 30
+        # ── 3. Event flash markers ────────────────────────────────
+        for (ex, ey, etype) in flash_lookup.get(fid, []):
+            ec = EVENT_COLORS.get(etype, (255, 255, 255))
+            cv2.circle(img, (ex, ey), 18, ec, 2, cv2.LINE_AA)
+            cv2.putText(img, etype.upper(), (ex + 20, ey),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, ec, 1, cv2.LINE_AA)
 
-            for _, ev in frame_events.iterrows():
-                etype = str(ev["event_type"]).upper()
-                tid = int(ev["track_id"])
+        # ── 4. HUD ────────────────────────────────────────────────
+        cv2.putText(img, f"Frame {fid:05d}", (10, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (200, 200, 200), 1, cv2.LINE_AA)
 
-                # HUD Text (Top Left)
-                cv2.putText(img, f"> {etype} (Player {tid})", (20, y_offset),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                y_offset += 25
-                
-        # --- THE MISSING LINE ---
-        out.write(img)
+        # Legend (top-left)
+        for i, (team, color) in enumerate(TEAM_COLORS.items()):
+            if team == "unknown":
+                continue
+            lx, ly = 10, 20 + i * 18
+            cv2.circle(img, (lx + 6, ly), 5, color, -1)
+            cv2.putText(img, team, (lx + 14, ly + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                        (240, 240, 240), 1, cv2.LINE_AA)
 
-    out.release()
-    print(f"\n  ✅ Showcase saved to: {OUT_VID}")
-    print("  Play this file to see your Phase 1 intelligence system in action.")
+        writer.write(img)
+
+    writer.release()
+    print(f"\n  ✅  Radar video saved → {out_vid}")
+    print(f"  Play with: vlc {out_vid}\n")
+
+
+# ─────────────────────────────────────────────────────────────────
+#  CLI
+# ─────────────────────────────────────────────────────────────────
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="Render top-down tactical radar video."
+    )
+    p.add_argument("--tracks", required=True)
+    p.add_argument("--events", required=True)
+    p.add_argument("--pitch",  required=True)
+    p.add_argument("--out",    required=True)
+    p.add_argument("--teams",  default=None, help="team_assignments.csv (optional)")
+    p.add_argument("--fps",    type=int, default=FPS)
+    return p.parse_args()
+
 
 if __name__ == "__main__":
-    run_showcase()
+    args = _parse_args()
+    run_showcase(
+        tracks_csv = args.tracks,
+        events_csv = args.events,
+        pitch_img  = args.pitch,
+        out_vid    = args.out,
+        teams_csv  = args.teams,
+        fps        = args.fps,
+    )
