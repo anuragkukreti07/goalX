@@ -64,4 +64,5 @@ Thumbs.db
 # ==============================
 # ByteTrack cache
 # ==============================
-src/goalx/ps1_cv/bytetrack/__pycache__/
+src/goalx/ps1_cv/bytetrack/__pycache__/outputs_193/
+temp.py
