@@ -283,18 +283,32 @@ def _build_pipeline(cfg: dict[str, Any]) -> list[Stage]:
             outputs = [o["eval_dir"]],
             skip_check = False,  # always re-evaluate
         ),
+        # Stage(
+        #     name   = "SYS-3  export thesis report",
+        #     script = f"{src}/ps3_ml/export_report.py",
+        #     args   = [
+        #         "--eval-dir",         o["eval_dir"],
+        #         "--radar-charts-dir", o["radar_charts_dir"],
+        #         "--heatmaps-dir",     o["heatmaps_dir"],
+        #         "--clutch",           o["clutch_csv"],
+        #         "--events",           o["events_csv"],
+        #         "--out",              o["thesis_report_html"],
+        #     ],
+        #     inputs  = [o["eval_dir"]],
+        #     outputs = [o["thesis_report_html"]],
+        #     skip_check = False,
+        # ),
         Stage(
             name   = "SYS-3  export thesis report",
-            script = f"{src}/export_report.py",
+            script = f"{src}/ps3_ml/export_report.py",
             args   = [
-                "--eval-dir",         o["eval_dir"],
-                "--radar-charts-dir", o["radar_charts_dir"],
-                "--heatmaps-dir",     o["heatmaps_dir"],
-                "--clutch",           o["clutch_csv"],
-                "--events",           o["events_csv"],
-                "--out",              o["thesis_report_html"],
+                "--radar-dir",    o["radar_charts_dir"],  # Updated to --radar-dir
+                "--heatmaps-dir", o["heatmaps_dir"],
+                "--clutch",       o["clutch_csv"],
+                "--events",       o["events_csv"],
+                "--out",          o["thesis_report_html"],
             ],
-            inputs  = [o["eval_dir"]],
+            inputs  = [o["clutch_csv"]],  # Removed eval_dir dependency here
             outputs = [o["thesis_report_html"]],
             skip_check = False,
         ),

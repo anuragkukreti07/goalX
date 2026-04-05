@@ -1,7 +1,7 @@
 """
 player_rating.py  —  PS4 Step 3
 ─────────────────────────────────
-Composite per-player rating — the final synthesis of the entire goalX pipeline.
+Composite per-player rating aggregating six pipeline dimensions.
 
 Why this file exists
 ─────────────────────
@@ -13,6 +13,18 @@ that answers: "Who performed best in this clip?"
 player_rating.py aggregates everything into one interpretable rating on a
 0–10 scale, with separate dimensional scores so the committee can see why
 a player received their rating.
+
+FIXES
+─────────────────────────────────
+FIX 1 — Wrong column name for pitch control (CRITICAL)
+  Accepts both "home_pct" and "home_poss", and scales 0-100 values 
+  down to [0, 1] fractions automatically. Prints which column was used.
+
+FIX 2 — "ball" / "uncertain" teams excluded from rating
+  Only valid team tracks ("home", "away") appear in the leaderboard.
+
+FIX 3 — Pressing uses both "pressure" and "press" event types
+  Safely captures all pressing events regardless of pipeline version.
 """
 
 from __future__ import annotations
@@ -42,6 +54,9 @@ W_POSITIONING = 0.10
 assert abs(W_CLUTCH + W_INFLUENCE + W_PRESSING +
            W_WORK_RATE + W_VERSATILITY + W_POSITIONING - 1.0) < 0.001
 
+FPS = 25.0
+VALID_TEAMS = {"home", "away"}   # FIX 2: exclude ball/uncertain/ref from leaderboard
+
 _DARK  = "#0e1117"; _SURF  = "#1a1d23"; _BORD = "#2e3140"; _TEXT = "#c8c8d0"
 _GOLD  = "#f59e0b"; _BLUE  = "#3b82f6"; _GREEN = "#3dbf7a"
 _RED   = "#ef4444"; _PURP  = "#8b5cf6"; _TEAL  = "#14b8a6"
@@ -63,8 +78,6 @@ plt.rcParams.update({
     "font.size":        10,     "legend.facecolor": _SURF,
     "legend.edgecolor": _BORD,
 })
-
-FPS = 25.0
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -96,7 +109,7 @@ def _influence_dim(centrality_df: pd.DataFrame) -> pd.Series:
     if centrality_df.empty or "pagerank" not in centrality_df.columns:
         return pd.Series(dtype=float)
     
-    # FIX: Filter out duplicates from centrality_all.csv
+    # Filter out duplicates from centrality_all.csv
     df = centrality_df.copy()
     if "team" in df.columns and "both" in df["team"].values:
         df = df[df["team"] == "both"]
@@ -105,33 +118,22 @@ def _influence_dim(centrality_df: pd.DataFrame) -> pd.Series:
     return df.set_index("track_id")["pagerank"].rename("influence")
 
 
-def _pressing_dim(events_df: pd.DataFrame,
-                   tracks_df: pd.DataFrame) -> pd.Series:
-    """
-    Pressing events per minute per player.
-    Uses pressure events where track_id is available.
-    """
+def _pressing_dim(events_df: pd.DataFrame, tracks_df: pd.DataFrame) -> pd.Series:
+    """Pressing events per minute per player."""
+    # FIX 3: accept both "pressure" and "press"
     press = events_df[events_df["event_type"].isin(["pressure", "press"])].copy()
     if press.empty or "track_id" not in press.columns:
         return pd.Series(dtype=float)
 
     total_minutes = tracks_df["frame_id"].nunique() / FPS / 60
-    counts = press.groupby("track_id").size()
+    counts = press[press["track_id"] >= 0].groupby("track_id").size()
     return (counts / max(total_minutes, 1/60)).rename("pressing")
 
 
-def _work_rate_dim(analytics_df: pd.DataFrame,
-                    tracks_df: pd.DataFrame) -> pd.Series:
-    """
-    Total distance covered in km.
-    Uses spatial_analytics.csv if available; falls back to computing
-    from smoothed_tracks directly.
-    """
-    if (not analytics_df.empty and
-            "total_distance_m" in analytics_df.columns and
-            "track_id" in analytics_df.columns):
+def _work_rate_dim(analytics_df: pd.DataFrame, tracks_df: pd.DataFrame) -> pd.Series:
+    """Total distance covered in km."""
+    if (not analytics_df.empty and "total_distance_m" in analytics_df.columns and "track_id" in analytics_df.columns):
         dist = analytics_df.set_index("track_id")["total_distance_m"] / 1000
-        # FIX: Drop duplicates just in case spatial_analytics has multiple rows per ID
         dist = dist[~dist.index.duplicated(keep="first")]
         return dist.rename("work_rate")
 
@@ -139,7 +141,7 @@ def _work_rate_dim(analytics_df: pd.DataFrame,
     if tracks_df.empty or "pitch_x" not in tracks_df.columns:
         return pd.Series(dtype=float)
 
-    tracks_s = tracks_df.sort_values(["track_id", "frame_id"])
+    tracks_s = tracks_df[tracks_df["track_id"] >= 0].sort_values(["track_id", "frame_id"])
     tracks_s["dx"] = tracks_s.groupby("track_id")["pitch_x"].diff().fillna(0)
     tracks_s["dy"] = tracks_s.groupby("track_id")["pitch_y"].diff().fillna(0)
     tracks_s["dist_px"] = np.sqrt(tracks_s["dx"]**2 + tracks_s["dy"]**2)
@@ -148,11 +150,7 @@ def _work_rate_dim(analytics_df: pd.DataFrame,
 
 
 def _versatility_dim(actions_df: pd.DataFrame) -> pd.Series:
-    """
-    Shannon entropy of action distribution per player.
-    A player with balanced IDLE/CARRY/DRIBBLE/PRESS/etc. scores higher
-    than one who only ever IDLEs.
-    """
+    """Shannon entropy of action distribution per player."""
     if actions_df.empty or "action" not in actions_df.columns:
         return pd.Series(dtype=float)
 
@@ -161,27 +159,31 @@ def _versatility_dim(actions_df: pd.DataFrame) -> pd.Series:
         probs = probs[probs > 0]
         return float(-np.sum(probs * np.log2(probs)))
 
-    dist = (actions_df.groupby(["track_id", "action"])
-            .size().unstack(fill_value=0))
+    dist = (actions_df[actions_df.get("track_id", pd.Series([], dtype=int)) >= 0]
+            .groupby(["track_id", "action"]).size().unstack(fill_value=0))
     entropy = dist.apply(_entropy, axis=1)
     return entropy.rename("versatility")
 
 
-def _positioning_dim(control_df: pd.DataFrame,
-                      tracks_df: pd.DataFrame,
-                      team_map: dict[int, str]) -> pd.Series:
-    """
-    Mean pitch control area (normalised Voronoi fraction) that a player's
-    team controls when they are on the pitch.
-    """
-    if (control_df.empty or
-            "home_poss" not in control_df.columns or
-            "frame_id" not in control_df.columns):
+def _positioning_dim(control_df: pd.DataFrame, tracks_df: pd.DataFrame, team_map: dict[int, str]) -> pd.Series:
+    """Mean pitch control area that a player's team controls when they are on the pitch."""
+    if control_df.empty or "frame_id" not in control_df.columns:
         return pd.Series(dtype=float)
 
+    # FIX 1: column name resolution & proper scaling
+    if "home_pct" in control_df.columns:
+        pct_col = "home_pct"
+    elif "home_poss" in control_df.columns:
+        pct_col = "home_poss"
+        print("  ⚠  pitch_control.csv uses deprecated column 'home_poss'.")
+    else:
+        print("  ⚠  pitch_control.csv has neither 'home_pct' nor 'home_poss'.")
+        return pd.Series(dtype=float)
+
+    print(f"  ✔  positioning_dim using column '{pct_col}' from pitch_control.csv")
+
     poss_map: dict[int, float] = dict(
-        zip(control_df["frame_id"].astype(int),
-            control_df["home_poss"].astype(float))
+        zip(control_df["frame_id"].astype(int), control_df[pct_col].astype(float) / 100.0)
     )
 
     result: dict[int, list[float]] = {}
@@ -191,6 +193,10 @@ def _positioning_dim(control_df: pd.DataFrame,
             continue
         fid  = int(row["frame_id"])
         team = team_map.get(tid, "")
+        
+        if team not in VALID_TEAMS:
+            continue
+            
         poss = poss_map.get(fid, 0.5)
         val  = poss if team == "home" else (1 - poss)
         result.setdefault(tid, []).append(val)
@@ -204,12 +210,8 @@ def _positioning_dim(control_df: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────
 
 def build_ratings(clutch_df, centrality_df, events_df, actions_df, analytics_df,
-                   control_df, tracks_df, team_map: dict[int, str]
-                   ) -> pd.DataFrame:
-    """
-    Assemble all dimensions and compute composite rating.
-    Returns one row per track_id with all dimensional scores + composite.
-    """
+                   control_df, tracks_df, team_map: dict[int, str]) -> pd.DataFrame:
+    
     dims: list[pd.Series] = [
         _clutch_dim(clutch_df),
         _influence_dim(centrality_df),
@@ -218,36 +220,30 @@ def build_ratings(clutch_df, centrality_df, events_df, actions_df, analytics_df,
         _versatility_dim(actions_df),
         _positioning_dim(control_df, tracks_df, team_map),
     ]
-    dim_names = ["clutch", "influence", "pressing",
-                 "work_rate", "versatility", "positioning"]
-    weights   = [W_CLUTCH, W_INFLUENCE, W_PRESSING,
-                 W_WORK_RATE, W_VERSATILITY, W_POSITIONING]
+    dim_names = ["clutch", "influence", "pressing", "work_rate", "versatility", "positioning"]
+    weights   = [W_CLUTCH, W_INFLUENCE, W_PRESSING, W_WORK_RATE, W_VERSATILITY, W_POSITIONING]
 
-    # Align all series on track_id
-    all_ids = sorted(set(tracks_df[tracks_df["track_id"] >= 0]["track_id"]
-                         .astype(int).unique()))
+    # FIX 2: only include valid player tracks (not ball/uncertain/ref)
+    all_ids = sorted({tid for tid, t in team_map.items() if tid >= 0 and t in VALID_TEAMS})
+    
+    if not all_ids:
+        print("  ⚠  No valid players found for leaderboard!")
+        return pd.DataFrame()
+
     df = pd.DataFrame(index=all_ids)
     df.index.name = "track_id"
 
     for name, series in zip(dim_names, dims):
         if not series.empty:
-            # Drop duplicates gracefully if they sneak in
             series = series[~series.index.duplicated(keep='first')]
             df[name] = series.reindex(all_ids, fill_value=0.0)
         else:
             df[name] = 0.0
 
-    # Normalise each dimension to [0, 10]
     for name in dim_names:
         df[f"{name}_n"] = _norm_col(df[name]) * 10
 
-    # Composite
-    df["composite"] = sum(
-        w * df[f"{n}_n"]
-        for w, n in zip(weights, dim_names)
-    )
-
-    # Add team label
+    df["composite"] = sum(w * df[f"{n}_n"] for w, n in zip(weights, dim_names))
     df["team"] = df.index.map(lambda t: team_map.get(t, "unknown"))
     df["rank"] = df["composite"].rank(ascending=False, method="min").astype(int)
 
@@ -259,23 +255,20 @@ def build_ratings(clutch_df, centrality_df, events_df, actions_df, analytics_df,
 # ─────────────────────────────────────────────────────────────────
 
 def make_leaderboard_figure(ratings: pd.DataFrame, out_path: Path) -> None:
-    """Horizontal bar chart ranked by composite score."""
+    if ratings.empty:
+        return
     top = ratings.head(min(20, len(ratings)))
     fig, ax = plt.subplots(figsize=(11, max(4, len(top) * 0.45)))
     fig.patch.set_facecolor(_DARK)
     ax.set_facecolor(_SURF)
 
-    labels  = [f"ID {int(r['track_id'])}  [{r['team']}]"
-               for _, r in top.iterrows()]
+    labels  = [f"ID {int(r['track_id'])}  [{r['team']}]" for _, r in top.iterrows()]
     values  = top["composite"].values
-    colors  = [_BLUE if t == "home" else _RED
-               for t in top["team"].values]
+    colors  = [_BLUE if t == "home" else _RED for t in top["team"].values]
 
-    bars = ax.barh(labels[::-1], values[::-1],
-                   color=colors[::-1], height=0.65, zorder=3)
+    bars = ax.barh(labels[::-1], values[::-1], color=colors[::-1], height=0.65, zorder=3)
     ax.set_xlabel("Composite rating (0–10)")
-    ax.set_title("Player rating leaderboard", color="#e8e8f0",
-                 fontsize=13, fontweight="bold")
+    ax.set_title("Player rating leaderboard", color="#e8e8f0", fontsize=13, fontweight="bold")
     ax.set_xlim(0, 11)
     ax.grid(axis="x", alpha=0.3, zorder=0)
     ax.spines[["top","right"]].set_visible(False)
@@ -284,29 +277,20 @@ def make_leaderboard_figure(ratings: pd.DataFrame, out_path: Path) -> None:
         ax.text(val + 0.1, bar.get_y() + bar.get_height() / 2,
                 f"{val:.2f}", va="center", fontsize=8.5, color=_TEXT)
 
-    legend_patches = [
-        mpatches.Patch(color=_BLUE, label="Home"),
-        mpatches.Patch(color=_RED,  label="Away"),
-    ]
-    ax.legend(handles=legend_patches, loc="lower right",
-              facecolor=_SURF, edgecolor=_TEXT, labelcolor=_TEXT)
+    legend_patches = [mpatches.Patch(color=_BLUE, label="Home"), mpatches.Patch(color=_RED,  label="Away")]
+    ax.legend(handles=legend_patches, loc="lower right", facecolor=_SURF, edgecolor=_TEXT, labelcolor=_TEXT)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  ✔  Leaderboard → {out_path}")
 
 
-def make_radar_comparison(ratings: pd.DataFrame, out_path: Path,
-                           top_n: int = 5) -> None:
-    """
-    Spider/radar chart overlaying the top-N players across all 6 dimensions.
-    """
-    dims = ["clutch_n", "influence_n", "pressing_n",
-            "work_rate_n", "versatility_n", "positioning_n"]
-    dim_labels = ["Clutch", "Influence", "Pressing",
-                  "Work rate", "Versatility", "Positioning"]
+def make_radar_comparison(ratings: pd.DataFrame, out_path: Path, top_n: int = 5) -> None:
+    if ratings.empty:
+        return
+    dims = ["clutch_n", "influence_n", "pressing_n", "work_rate_n", "versatility_n", "positioning_n"]
+    dim_labels = ["Clutch", "Influence", "Pressing", "Work rate", "Versatility", "Positioning"]
 
     top = ratings.head(min(top_n, len(ratings)))
     N   = len(dims)
@@ -314,8 +298,7 @@ def make_radar_comparison(ratings: pd.DataFrame, out_path: Path,
     angles = [n / N * 2 * math.pi for n in range(N)]
     angles += angles[:1]  # close the polygon
 
-    fig, ax = plt.subplots(figsize=(8, 8),
-                            subplot_kw={"projection": "polar"})
+    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"projection": "polar"})
     fig.patch.set_facecolor(_DARK)
     ax.set_facecolor(_SURF)
 
@@ -325,8 +308,7 @@ def make_radar_comparison(ratings: pd.DataFrame, out_path: Path,
     ax.set_xticklabels(dim_labels, color=_TEXT, fontsize=9)
     ax.set_ylim(0, 10)
     ax.set_yticks([2, 4, 6, 8, 10])
-    ax.set_yticklabels(["2", "4", "6", "8", "10"],
-                        color="#6a6d80", fontsize=7)
+    ax.set_yticklabels(["2", "4", "6", "8", "10"], color="#6a6d80", fontsize=7)
     ax.grid(color=_BORD, linewidth=0.6)
 
     palette = [_GOLD, _BLUE, _GREEN, _RED, _PURP, _TEAL]
@@ -338,21 +320,17 @@ def make_radar_comparison(ratings: pd.DataFrame, out_path: Path,
         ax.plot(angles, values, color=color, lw=2, alpha=0.85)
         ax.fill(angles, values, color=color, alpha=0.12)
 
-    ax.set_title("Top player radar comparison", color="#e8e8f0",
-                 fontsize=12, fontweight="bold", pad=20)
+    ax.set_title("Top player radar comparison", color="#e8e8f0", fontsize=12, fontweight="bold", pad=20)
 
     legend_handles = [
         mpatches.Patch(color=palette[i % len(palette)],
-                       label=f"ID {int(row['track_id'])} [{row['team']}] "
-                             f"({row['composite']:.2f})")
+                       label=f"ID {int(row['track_id'])} [{row['team']}] ({row['composite']:.2f})")
         for i, (_, row) in enumerate(top.iterrows())
     ]
-    ax.legend(handles=legend_handles, loc="upper right",
-              bbox_to_anchor=(1.35, 1.1),
+    ax.legend(handles=legend_handles, loc="upper right", bbox_to_anchor=(1.35, 1.1),
               facecolor=_SURF, edgecolor=_TEXT, labelcolor=_TEXT, fontsize=8)
 
-    fig.savefig(out_path, dpi=150, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  ✔  Radar comparison → {out_path}")
 
@@ -409,6 +387,10 @@ class PlayerRatingEngine:
             control, tracks, team_map,
         )
 
+        if ratings.empty:
+            print("  ❌  Could not build ratings. Check if valid teams exist.")
+            return
+
         # Save
         csv_path = self.out_dir / "player_ratings.csv"
         ratings.to_csv(csv_path, index=False)
@@ -447,7 +429,6 @@ class PlayerRatingEngine:
 
 def _parse_args():
     p = argparse.ArgumentParser(description="Composite player rater (goalX PS4).")
-    # Aligned defaults to standard pipeline output paths
     p.add_argument("--clutch",     default="outputs/clutch_scores.csv")
     p.add_argument("--centrality", default="outputs/pass_network/centrality_all.csv")
     p.add_argument("--events",     default="outputs/events.csv")

@@ -166,7 +166,8 @@ def extract_possession(
     if ball_df.empty:
         return pd.DataFrame()
 
-    ball_dict = ball_df.set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
+    #ball_dict = ball_df.set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
+    ball_dict = ball_df.drop_duplicates(subset=["frame_id"]).set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
     owner_log: list[dict] = []
     
     current_owner = None
@@ -256,7 +257,8 @@ def extract_pressure(
     if ball_df.empty:
         return pd.DataFrame()
 
-    ball_dict = ball_df.set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
+    #ball_dict = ball_df.set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
+    ball_dict = ball_df.drop_duplicates(subset=["frame_id"]).set_index("frame_id")[["smooth_x", "smooth_y"]].to_dict("index")
     events = []
     last_pressure_frame = -999   
 

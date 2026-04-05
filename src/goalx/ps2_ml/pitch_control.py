@@ -274,6 +274,7 @@ def _parse_args():
     p.add_argument("--out-dir",      default="outputs/pitch_control")
     p.add_argument("--pitch-w",      type=int, default=PITCH_W)
     p.add_argument("--pitch-h",      type=int, default=PITCH_H)
+    p.add_argument("--pitch", default="data/pitch_map.png", help="Background pitch image") 
     p.add_argument("--heatmap",      action="store_true",
                    help="Also export a spatial heatmap grid CSV")
     p.add_argument("--sample-every", type=int, default=SAMPLE_EVERY,

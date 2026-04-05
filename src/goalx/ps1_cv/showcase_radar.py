@@ -12,6 +12,7 @@ Improvements over v1
   • Player trails (last TRAIL_FRAMES positions)
   • Correct frame_id column (was reading wrong column name before)
   • Event HUD always rendered even without team assignments
+  • Out-Of-Bounds (OOB) filtering to prevent ghost trails on camera cuts
 """
 
 import argparse
@@ -132,10 +133,17 @@ def run_showcase(
         # ── 1. Draw player trails ──────────────────────────────────
         for _, row in frame_tracks.iterrows():
             tid = int(row["track_id"])
-            if pd.isna(row.get("smooth_x")) or pd.isna(row.get("smooth_y")):
+            sx = row.get("smooth_x")
+            sy = row.get("smooth_y")
+            
+            # --- FIX: Skip NaN and out-of-canvas positions ---
+            if pd.isna(sx) or pd.isna(sy):
                 continue
-            px = int(np.clip(row["smooth_x"], 0, w - 1))
-            py = int(np.clip(row["smooth_y"], 0, h - 1))
+            if not (0 <= sx <= w and 0 <= sy <= h):
+                continue
+                
+            px = int(sx)
+            py = int(sy)
 
             trail_hist[tid].append((px, py))
             if tid != -1:
@@ -149,10 +157,17 @@ def run_showcase(
         # ── 2. Draw players and ball ───────────────────────────────
         for _, row in frame_tracks.iterrows():
             tid = int(row["track_id"])
-            if pd.isna(row.get("smooth_x")) or pd.isna(row.get("smooth_y")):
+            sx = row.get("smooth_x")
+            sy = row.get("smooth_y")
+            
+            # --- FIX: Skip NaN and out-of-canvas positions ---
+            if pd.isna(sx) or pd.isna(sy):
                 continue
-            px = int(np.clip(row["smooth_x"], 0, w - 1))
-            py = int(np.clip(row["smooth_y"], 0, h - 1))
+            if not (0 <= sx <= w and 0 <= sy <= h):
+                continue
+                
+            px = int(sx)
+            py = int(sy)
 
             if tid == -1:
                 # Ball
