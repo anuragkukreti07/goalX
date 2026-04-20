@@ -8,8 +8,10 @@ MERGED FEATURES:
   2. Low-confidence tracks marked "uncertain" (< 0.50)
   3. Minimum crop sizes and grass filtering
   4. Anchor-only K-Means (only uses tracks with >= 30 frames to define clusters)
-  5. Auto-remap (smallest cluster = other/refs, larger = home/away)
+  5. Auto-remap (Largest 2 clusters = home/away, remaining = other/refs)
   6. Debug Mosaics (outputs jpg collages of the shirts for easy verification)
+  7. NEW: Torso-only cropping (15% to 70% of height) to ignore grass and socks
+  8. NEW: HSV Histogram feature extraction for robust pigment clustering
 """
 
 import argparse
@@ -28,12 +30,10 @@ from tqdm import tqdm
 # ─────────────────────────────────────────────────────────────────
 
 SAMPLES_PER_TRACK  = 12
-SHIRT_CROP_FRAC    = 0.55
 MIN_CROP_PIXELS    = 300
-N_TEAMS            = 3
+DEFAULT_CLUSTERS   = 4      # K=4 to split Home, Away, GK, Ref
 GRASS_HUE_LO       = 35
 GRASS_HUE_HI       = 85
-GRASS_SAT_MIN      = 40
 MIN_CONF_THRESHOLD = 0.50   # Tracks below this → "uncertain"
 TRACK_ID_BALL      = -1     # Exclude from clustering
 MIN_ANCHOR_FRAMES  = 30     # Only tracks with this many frames vote for centroids
@@ -43,26 +43,34 @@ MIN_ANCHOR_FRAMES  = 30     # Only tracks with this many frames vote for centroi
 #  Colour extraction & Mosaic helpers
 # ─────────────────────────────────────────────────────────────────
 
-def _non_grass_mask(hsv: np.ndarray) -> np.ndarray:
-    h, s = hsv[:, :, 0], hsv[:, :, 1]
-    return ~((h >= GRASS_HUE_LO) & (h <= GRASS_HUE_HI) & (s > GRASS_SAT_MIN))
-
-def _dominant_hsv(bgr_crop: np.ndarray) -> np.ndarray | None:
+def _extract_hsv_histogram(bgr_crop: np.ndarray) -> np.ndarray | None:
+    """Extracts a normalized H/S histogram from non-grass pixels."""
     if bgr_crop.size == 0 or bgr_crop.shape[0] * bgr_crop.shape[1] < MIN_CROP_PIXELS:
         return None
-    hsv    = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2HSV)
-    pixels = hsv[_non_grass_mask(hsv)]
-    if len(pixels) < 40:
+    
+    hsv = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2HSV)
+    
+    # Mask out green grass pixels before computing histogram
+    green_mask = (hsv[:,:,0] > GRASS_HUE_LO) & (hsv[:,:,0] < GRASS_HUE_HI)
+    hsv_filtered = hsv[~green_mask]
+    
+    if len(hsv_filtered) < 40:
         return None
-    k  = min(2, len(pixels))
-    km = KMeans(n_clusters=k, n_init=3, random_state=0)
-    km.fit(pixels)
-    _, counts    = np.unique(km.labels_, return_counts=True)
-    dominant_idx = int(np.argmax(counts))
-    return km.cluster_centers_[dominant_idx].astype(np.float32)
+        
+    # Use H and S channels only, flatten to feature vector
+    hist_h = np.histogram(hsv_filtered[:,0], bins=18, range=(0,180))[0]
+    hist_s = np.histogram(hsv_filtered[:,1], bins=8, range=(0,256))[0]
+    feature = np.concatenate([hist_h, hist_s]).astype(np.float32)
+    
+    # Normalize the histogram so bounding box size doesn't skew clustering distance
+    feature_sum = feature.sum()
+    if feature_sum > 0:
+        feature /= feature_sum
+        
+    return feature
 
 def _sample_colours_and_crop(rows: pd.DataFrame, frames_dir: Path, n: int):
-    """Returns (list_of_hsv_colors, best_bgr_crop_for_mosaic)"""
+    """Returns (list_of_hsv_histograms, best_bgr_crop_for_mosaic)"""
     if len(rows) > n:
         rows = rows.sample(n=n, random_state=42)
     colours = []
@@ -75,14 +83,23 @@ def _sample_colours_and_crop(rows: pd.DataFrame, frames_dir: Path, n: int):
         img = cv2.imread(str(fpath))
         if img is None:
             continue
+            
         h_img, w_img = img.shape[:2]
         x1 = max(0, int(row["x1"]));  x2 = min(w_img, int(row["x2"]))
         y1 = max(0, int(row["y1"]));  y2 = min(h_img, int(row["y2"]))
-        box_h    = y2 - y1
-        shirt_y2 = y1 + max(1, int(box_h * SHIRT_CROP_FRAC))
-        crop     = img[y1:shirt_y2, x1:x2]
+        box_h = y2 - y1
         
-        c = _dominant_hsv(crop)
+        # Use only torso (skip head, stop before legs)
+        torso_y1 = y1 + int(box_h * 0.15)
+        torso_y2 = y1 + int(box_h * 0.70)
+        
+        # Bounds check
+        torso_y1 = min(max(torso_y1, 0), h_img)
+        torso_y2 = min(max(torso_y2, torso_y1 + 1), h_img)
+        
+        crop = img[torso_y1:torso_y2, x1:x2]
+        
+        c = _extract_hsv_histogram(crop)
         if c is not None:
             colours.append(c)
             if best_crop is None or crop.size > best_crop.size:
@@ -114,7 +131,8 @@ def create_mosaic(crops, out_path):
 def classify_teams(tracks_csv: str, frames_dir: str,
                    out_file_path: str,
                    n_samples: int = SAMPLES_PER_TRACK,
-                   min_anchor: int = MIN_ANCHOR_FRAMES) -> pd.DataFrame:
+                   min_anchor: int = MIN_ANCHOR_FRAMES,
+                   n_clusters: int = DEFAULT_CLUSTERS) -> pd.DataFrame:
 
     tracks_csv = Path(tracks_csv)
     frames_dir = Path(frames_dir)
@@ -143,7 +161,7 @@ def classify_teams(tracks_csv: str, frames_dir: str,
     anchor_ids = track_counts[track_counts >= min_anchor].index.tolist()
     
     # Fallback if video is too short
-    if len(anchor_ids) < N_TEAMS:
+    if len(anchor_ids) < n_clusters:
         print(f"  ⚠  Not enough tracks with >={min_anchor} frames. Falling back to all tracks.")
         anchor_ids = player_ids
 
@@ -172,18 +190,18 @@ def classify_teams(tracks_csv: str, frames_dir: str,
     if n_no_crops > 0:
         print(f"  ⚠  {n_no_crops} player tracks had zero valid colour crops (too small).")
 
-    if len(anchor_colours) < N_TEAMS:
-        raise RuntimeError(f"Only {len(anchor_colours)} valid anchor samples — need at least {N_TEAMS}.")
+    if len(anchor_colours) < n_clusters:
+        raise RuntimeError(f"Only {len(anchor_colours)} valid anchor samples — need at least {n_clusters}.")
 
     # ── Step 2: K-Means strictly on Anchor Tracks ─────────────────
     X_anchors = np.stack(anchor_colours)
-    print(f"\n  Clustering {len(X_anchors)} anchor samples into {N_TEAMS} jersey groups …")
-    km = KMeans(n_clusters=N_TEAMS, n_init=15, max_iter=300, random_state=42)
+    print(f"\n  Clustering {len(X_anchors)} anchor samples into {n_clusters} jersey groups …")
+    km = KMeans(n_clusters=n_clusters, n_init=15, max_iter=300, random_state=42)
     km.fit(X_anchors)
 
     # ── Step 3: Majority-vote & Auto-Remap ────────────────────────
     records = []
-    cluster_sizes = {0: 0, 1: 0, 2: 0}
+    cluster_sizes = {i: 0 for i in range(n_clusters)}
 
     for tid in player_ids:
         colours = colour_map[int(tid)]
@@ -206,13 +224,17 @@ def classify_teams(tracks_csv: str, frames_dir: str,
         if conf >= MIN_CONF_THRESHOLD:
             cluster_sizes[int(best_cluster)] += 1
 
-    # Auto-remap: smallest is "other", others are "home"/"away"
-    sorted_clusters = sorted(cluster_sizes.keys(), key=lambda c: cluster_sizes[c])
-    label_map = {
-        sorted_clusters[0]: "other",
-        sorted_clusters[1]: "home",
-        sorted_clusters[2]: "away"
-    }
+    # Auto-remap: 2 largest are "home"/"away", remaining are "other" (refs/GKs)
+    sorted_clusters = sorted(cluster_sizes.keys(), key=lambda c: cluster_sizes[c], reverse=True)
+    label_map = {}
+    if len(sorted_clusters) >= 2:
+        label_map[sorted_clusters[0]] = "home"
+        label_map[sorted_clusters[1]] = "away"
+        for c in sorted_clusters[2:]:
+            label_map[c] = "other"
+    else:
+        for c in sorted_clusters:
+            label_map[c] = "other"
 
     # Apply labels and FIX 2 (uncertainties)
     for r in records:
@@ -236,8 +258,8 @@ def classify_teams(tracks_csv: str, frames_dir: str,
 
     # ── Generate Mosaics ──────────────────────────────────────────
     print("\n  Generating debug mosaics...")
-    for cluster_id in range(3):
-        team_name = label_map[cluster_id]
+    for cluster_id in range(n_clusters):
+        team_name = label_map.get(cluster_id, "unknown")
         tids = result_df[result_df["cluster_id"] == cluster_id]["track_id"].tolist()
         crops = [crop_map[t] for t in tids if t in crop_map]
         mosaic_path = out_dir / f"debug_team_{team_name}_cluster{cluster_id}.jpg"
@@ -272,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--out",        required=True)
     parser.add_argument("--samples",    type=int, default=SAMPLES_PER_TRACK)
     parser.add_argument("--min-anchor", type=int, default=MIN_ANCHOR_FRAMES)
+    parser.add_argument("--clusters",   type=int, default=DEFAULT_CLUSTERS, help="Number of KMeans clusters to find")
     args = parser.parse_args()
     
     classify_teams(
@@ -279,5 +302,6 @@ if __name__ == "__main__":
         frames_dir    = args.frames_dir,
         out_file_path = args.out,
         n_samples     = args.samples,
-        min_anchor    = args.min_anchor
+        min_anchor    = args.min_anchor,
+        n_clusters    = args.clusters
     )

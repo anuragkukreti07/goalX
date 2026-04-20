@@ -3,3 +3,59 @@ numpy
 pandas
 matplotlib
 tqdm
+# 1. Generate the 2D Pitch Map
+python3 src/goalx/ps1_cv/draw_pitch.py \
+    --out data/pitch_map.png
+
+# 2. Extract frames from the raw video
+python3 src/goalx/ps1_cv/extract_frames.py \
+    --video data/raw_videos/tracking/test3/SNMOT-193/video.mp4 \
+    --out-dir data/raw_videos/tracking/test3/SNMOT-193/img1/
+
+# 3. Calibrate Camera Homography (FIXED: --frame)
+python3 src/goalx/ps1_cv/homography_picker.py \
+    --frame data/raw_videos/tracking/test3/SNMOT-193/img1/000750.jpg \
+    --pitch data/pitch_map.png \
+    --out outputs_193/homography_data.npz
+The Core Tracking Pipeline (Run sequentially)
+Bash
+# 4. Detect Players and Ball (The Dual-Model Engine)
+python3 src/goalx/ps1_cv/detect_ball.py \
+    --seq data/raw_videos/tracking/test3/SNMOT-193/img1/ \
+    --out-csv outputs_193/detections_with_ball.csv \
+    --player-model models/fine_tuned/yolov8_football.pt \
+    --ball-model yolov8s.pt \
+    --ball-conf 0.05
+
+# 5. Link Bounding Boxes to Stable Track IDs (ByteTrack)
+python3 src/goalx/ps1_cv/track_players.py \
+    --detections outputs_193/detections_with_ball.csv \
+    --out outputs_193/tracked_players.csv \
+    --sample-img data/raw_videos/tracking/test3/SNMOT-193/img1/000001.jpg
+
+# 6. Project Camera Coordinates to the 2D Pitch Plane
+python3 src/goalx/ps1_cv/project_tracks.py \
+    --tracks outputs_193/tracked_players.csv \
+    --homography outputs_193/homography_data.npz \
+    --pitch data/pitch_map.png \
+    --out outputs_193/projected_tracks.csv
+
+# 7. Smooth Trajectories and Fix Gaps (FIXED path typo)
+python3 src/goalx/ps1_cv/smooth_tracks.py \
+    --tracks outputs_193/projected_tracks.csv \
+    --out outputs_193/smoothed_tracks.csv \
+    --window 7 \
+    --clamp 50
+Analytics & Visual Output
+Bash
+# 8. Extract Tactical Events (Possession, Pressures, Shots)
+python3 src/goalx/ps1_cv/extract_events.py \
+    --tracks outputs_193/smoothed_tracks.csv \
+    --out outputs_193/events.csv
+
+# 9. Render the Upgraded Broadcast Overlay Video
+python3 src/goalx/ps1_cv/visualise_tracks.py \
+    --csv outputs_193/tracked_players.csv \
+    --frames data/raw_videos/tracking/test3/SNMOT-193/img1/ \
+    --events outputs_193/events.csv \
+    --out outputs_193/tracking_demo_upgraded.mp4

@@ -26,7 +26,7 @@ Output CSV columns (unchanged)
   track_id = -1 for all rows at this stage
 
 Usage — single model (original):
-  python3 src/goalx/ps1_cv/detect_ball.py \
+  python3 src/goalx/ps1_cv/detec    t_ball.py \
       --seq     data/raw_videos/tracking/test3/SNMOT-193/img1/ \
       --out-csv outputs_193/detections_with_ball.csv \
       --model   yolov8s.pt
@@ -73,8 +73,9 @@ BALL_CONF     = 0.05      # very low — ball is tiny, get FPs rather than miss 
 BALL_SLICE_H  = 400
 BALL_SLICE_W  = 400
 BALL_OVERLAP  = 0.2
-BALL_MIN_AREA = 9         # px² — discard sub 3×3 noise
-
+#BALL_MIN_AREA = 9        # px² — discard sub 3×3 noise
+BALL_MIN_AREA = 25   # Eliminates sub-5x5 noise (player feet)
+BALL_MAX_AREA = 2500 # Rejects large blobs (torsos, flags)
 
 # ─────────────────────────────────────────────────────────────────
 #  Player detection
@@ -164,17 +165,25 @@ def detect_ball_vanilla(frames, model, ball_class=32):
 def _keep_best_ball(ball_rows):
     if not ball_rows:
         return []
+    
     df = pd.DataFrame(ball_rows)
+    # Calculate bounding box area
     df["area"] = (df["x2"] - df["x1"]) * (df["y2"] - df["y1"])
-    df = df[df["area"] >= BALL_MIN_AREA].drop(columns="area")
+    
+    # Filter out impossible ball sizes
+    df = df[(df["area"] >= BALL_MIN_AREA) & (df["area"] <= BALL_MAX_AREA)]
+    df = df.drop(columns="area")
+    
     if df.empty:
         return []
+        
+    # Group by frame and keep the one with the highest confidence
     best = (df.sort_values("conf", ascending=False)
               .groupby("frame_id", sort=False)
               .first()
               .reset_index())
+              
     return best.to_dict("records")
-
 
 # ─────────────────────────────────────────────────────────────────
 #  Entry-point

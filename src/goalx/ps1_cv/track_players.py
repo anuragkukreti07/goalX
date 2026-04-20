@@ -21,8 +21,8 @@ from goalx.ps1_cv.bytetrack.byte_tracker import BYTETracker
 # ─────────────────────────────────────────────────────────────────
 
 # ByteTrack hyperparameters
-TRACK_THRESH  = 0.20    # minimum detection confidence to init a track
-MATCH_THRESH  = 0.90    # IoU threshold for track-detection association
+TRACK_THRESH  = 0.50    # minimum detection confidence to init a track
+MATCH_THRESH  = 0.80    # IoU threshold for track-detection association
 TRACK_BUFFER  = 90      # frames to keep a lost track alive (3 s @ 25 fps)
 
 

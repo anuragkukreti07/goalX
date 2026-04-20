@@ -53,9 +53,22 @@ def smooth_tracks(df: pd.DataFrame,
         ys     = group["pitch_y"].to_numpy(dtype=np.float64)
 
         # ── FIX 1: ball passes through unmodified ─────────────────
+        # ── FIX 1: Ball velocity gate (Clamp aerial/false jumps) ──
         if tid == TRACK_ID_BALL:
-            smooth_x[idx] = xs    # NaN stays NaN — no forward-fill
-            smooth_y[idx] = ys
+            dx = np.diff(xs, prepend=np.nan)
+            dy = np.diff(ys, prepend=np.nan)
+            jump = np.hypot(dx, dy)
+            
+            xs_clean = xs.copy()
+            ys_clean = ys.copy()
+            
+            # Nuke the teleporting frames (like penalty spot false detections)
+            xs_clean[jump > 150] = np.nan
+            ys_clean[jump > 150] = np.nan
+            
+            # Interpolate over the nuked frames to keep the ball path realistic
+            smooth_x[idx] = pd.Series(xs_clean).interpolate(method='linear', limit_direction='both').to_numpy()
+            smooth_y[idx] = pd.Series(ys_clean).interpolate(method='linear', limit_direction='both').to_numpy()
             continue
 
         # ── Physics clamp for players ─────────────────────────────
