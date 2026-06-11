@@ -66,3 +66,7 @@ Thumbs.db
 # ==============================
 src/goalx/ps1_cv/bytetrack/__pycache__/outputs_193/
 temp.py
+outputs_*/
+*.pdf
+temp_football_code/
+football-players-detection-1/
