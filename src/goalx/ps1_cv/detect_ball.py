@@ -26,7 +26,7 @@ Output CSV columns (unchanged)
   track_id = -1 for all rows at this stage
 
 Usage — single model (original):
-  python3 src/goalx/ps1_cv/detec    t_ball.py \
+  python3 src/goalx/ps1_cv/detect_ball.py \
       --seq     data/raw_videos/tracking/test3/SNMOT-193/img1/ \
       --out-csv outputs_193/detections_with_ball.csv \
       --model   yolov8s.pt
@@ -37,6 +37,7 @@ Usage — dual model (when fine-tuned model has 0 ball labels):
       --out-csv      outputs_193/detections_with_ball.csv \
       --player-model models/fine_tuned/yolov8_football.pt \
       --ball-model   yolov8s.pt
+      --ball-class   0
 """
 
 import argparse
@@ -109,8 +110,8 @@ def detect_players_batched(frames, model, player_class=0, batch_size=PLAYER_BATC
 #  Ball detection  (SAHI preferred, vanilla fallback)
 # ─────────────────────────────────────────────────────────────────
 
-def detect_ball_sahi(frames, ball_model_path):
-    """SAHI sliced ball detection. Always targets class 32 (COCO sports ball)."""
+def detect_ball_sahi(frames, ball_model_path, ball_class=0):
+    """SAHI sliced ball detection. Targets the specified ball_class."""
     detection_model = AutoDetectionModel.from_pretrained(
         model_type           = "ultralytics",  # Updated from 'yolov8' to match new SAHI API
         model_path           = ball_model_path,
@@ -130,7 +131,7 @@ def detect_ball_sahi(frames, ball_model_path):
             verbose=0,
         )
         for pred in result.object_prediction_list:
-            if pred.category.id != 32:
+            if pred.category.id != ball_class:
                 continue
             b = pred.bbox
             rows.append(dict(frame_id=frame_id, object_type="ball",
@@ -140,7 +141,7 @@ def detect_ball_sahi(frames, ball_model_path):
     return rows
 
 
-def detect_ball_vanilla(frames, model, ball_class=32):
+def detect_ball_vanilla(frames, model, ball_class=0):
     """Fallback when SAHI not installed."""
     rows = []
     use_half = (DEVICE != 'cpu')
@@ -190,7 +191,7 @@ def _keep_best_ball(ball_rows):
 # ─────────────────────────────────────────────────────────────────
 
 def run(seq_path="", output_csv="", model_path=MODEL_PATH,
-        player_model="", ball_model=""):
+        player_model="", ball_model="", ball_class=0):
     """
     player_model : fine-tuned model path for players (class 0).
                    Overrides model_path for player detection.
@@ -217,7 +218,7 @@ def run(seq_path="", output_csv="", model_path=MODEL_PATH,
     print(f"  Frames       : {len(frames)}")
     if dual_mode:
         print(f"  Player model : {p_model_path}")
-        print(f"  Ball model   : {b_model_path}  ← separate COCO model (class 32)")
+        print(f"  Ball model   : {b_model_path}  ← Targeting Class {ball_class}")
         print(f"  Mode         : DUAL-MODEL")
     else:
         print(f"  Model        : {p_model_path}")
@@ -233,37 +234,35 @@ def run(seq_path="", output_csv="", model_path=MODEL_PATH,
     player_rows = detect_players_batched(frames, p_model)
 
     # ── Ball ──────────────────────────────────────────────────────
-    # ALWAYS use a COCO-trained model (yolov8s.pt) for ball — it has class 32.
-    # A fine-tuned model with ball_class=1 but zero ball training data = 0 detections.
     if ball_model:
         # Explicit separate ball model specified
         if _SAHI_AVAILABLE:
-            ball_rows = detect_ball_sahi(frames, b_model_path)
+            ball_rows = detect_ball_sahi(frames, b_model_path, ball_class=ball_class)
         else:
             b_model = YOLO(b_model_path)
             b_model.to(DEVICE)
             b_model.fuse()
-            ball_rows = detect_ball_vanilla(frames, b_model)
+            ball_rows = detect_ball_vanilla(frames, b_model, ball_class=ball_class)
     elif player_model:
         # Fine-tuned player model given but no ball model specified.
         # Fall back to the base model_path for ball.
         print(f"\n  ⚠  --player-model set but --ball-model not set.")
-        print(f"     Using --model ({model_path}) for ball detection (class 32).")
+        print(f"     Using --model ({model_path}) for ball detection (class {ball_class}).")
         print(f"     If that model was also fine-tuned without ball labels,")
         print(f"     pass --ball-model yolov8s.pt explicitly.\n")
         if _SAHI_AVAILABLE:
-            ball_rows = detect_ball_sahi(frames, model_path)
+            ball_rows = detect_ball_sahi(frames, model_path, ball_class=ball_class)
         else:
             b_model = YOLO(model_path)
             b_model.to(DEVICE)
             b_model.fuse()
-            ball_rows = detect_ball_vanilla(frames, b_model)
+            ball_rows = detect_ball_vanilla(frames, b_model, ball_class=ball_class)
     else:
         # Single model mode
         if _SAHI_AVAILABLE:
-            ball_rows = detect_ball_sahi(frames, p_model_path)
+            ball_rows = detect_ball_sahi(frames, p_model_path, ball_class=ball_class)
         else:
-            ball_rows = detect_ball_vanilla(frames, p_model)
+            ball_rows = detect_ball_vanilla(frames, p_model, ball_class=ball_class)
 
     ball_rows = _keep_best_ball(ball_rows)
 
@@ -314,6 +313,8 @@ def _parse_args():
     p.add_argument("--ball-model",   default="",
                    help="COCO base model for ball (class 32). "
                         "Use yolov8s.pt when fine-tuned model has no ball labels.")
+    p.add_argument("--ball-class",   type=int, default=0,
+                   help="Class ID for the ball (0 for custom models, 32 for base COCO models).")
     p.add_argument("--ball-conf",    type=float, default=BALL_CONF,
                    help=f"Ball confidence threshold (default: {BALL_CONF})")
     return p.parse_args()
@@ -326,4 +327,5 @@ if __name__ == "__main__":
         output_csv   = args.out_csv,
         model_path   = args.model,
         player_model = args.player_model,
-        ball_model   = args.ball_model)
+        ball_model   = args.ball_model,
+        ball_class   = args.ball_class)
